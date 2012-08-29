@@ -52,6 +52,9 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 
+//Standard namespaces
+using namespace std;
+
 //Clang namespaces
 using namespace clang;
 using namespace clang::ast_matchers;
@@ -66,52 +69,97 @@ namespace clang
     namespace ast_matchers
     {
         AST_MATCHER_P(DeclStmt, containsDeclarationAnywhere,
-                      internal::Matcher<Decl>, InnerMatcher) 
+                      internal::Matcher<Decl>, InnerMatcher)
         {
             DeclStmt::const_decl_iterator Iterator = Node.decl_begin();
+
             while(Iterator != Node.decl_end())
             {
                 if(InnerMatcher.matches(**Iterator, Finder, Builder))
                 {
                     return true;
                 }
+
                 Iterator++;
             }
+
             return false;
+        }
+
+        AST_MATCHER_P(QualType, asMatchingString, std::string, RegExp)
+        {
+            assert(!RegExp.empty());
+            std::string NameString = Node.getAsString();
+            llvm::Regex RE(RegExp);
+            return RE.match(NameString);
         }
     }
 }
 
 //Helper methods
 template <typename T>
-static std::string getText(const SourceManager &SourceManager, const T &Node) {
-  SourceLocation StartSpellingLocation =
-      SourceManager.getSpellingLoc(Node.getLocStart());
-  SourceLocation EndSpellingLocation =
-      SourceManager.getSpellingLoc(Node.getLocEnd());
-  if (!StartSpellingLocation.isValid() || !EndSpellingLocation.isValid()) {
-    return std::string();
-  }
-  bool Invalid = true;
-  const char *Text =
-      SourceManager.getCharacterData(StartSpellingLocation, &Invalid);
-  if (Invalid) {
-    return std::string();
-  }
-  std::pair<FileID, unsigned> Start =
-      SourceManager.getDecomposedLoc(StartSpellingLocation);
-  std::pair<FileID, unsigned> End =
-      SourceManager.getDecomposedLoc(Lexer::getLocForEndOfToken(
-          EndSpellingLocation, 0, SourceManager, LangOptions()));
-  if (Start.first != End.first) {
-    // Start and end are in different files.
-    return std::string();
-  }
-  if (End.second < Start.second) {
-    // Shuffling text with macros may cause this.
-    return std::string();
-  }
-  return std::string(Text, End.second - Start.second);
+static std::string getText(const SourceManager &SourceManager, const T &Node)
+{
+    SourceLocation StartSpellingLocation =
+        SourceManager.getSpellingLoc(Node.getLocStart());
+    SourceLocation EndSpellingLocation =
+        SourceManager.getSpellingLoc(Node.getLocEnd());
+
+    if(!StartSpellingLocation.isValid() || !EndSpellingLocation.isValid())
+    {
+        return std::string();
+    }
+
+    bool Invalid = true;
+    const char *Text =
+        SourceManager.getCharacterData(StartSpellingLocation, &Invalid);
+
+    if(Invalid)
+    {
+        return std::string();
+    }
+
+    std::pair<FileID, unsigned> Start =
+        SourceManager.getDecomposedLoc(StartSpellingLocation);
+    std::pair<FileID, unsigned> End =
+        SourceManager.getDecomposedLoc(
+            Lexer::getLocForEndOfToken(
+                EndSpellingLocation, 
+                0, 
+                SourceManager, 
+                LangOptions()
+            )
+        );
+
+    if(Start.first != End.first)
+    {
+        //Start and end are in different files.
+        return std::string();
+    }
+
+    if(End.second < Start.second)
+    {
+        //Shuffling text with macros may cause this.
+        return std::string();
+    }
+
+    return std::string(Text, End.second - Start.second);
+}
+
+std::string transform_complex_type_declaration(std::string original_declaration)
+{
+    //Create a regular expression to grab the template type out.  This regex
+    //will match if the type is float or double or long double, though it could
+    //probably do with being tightened up a little bit...
+    llvm::Regex regex(
+        ".*complex[[:space:]]*<[[:space:]]*"
+        "([[:alpha:]].*[[:alpha:]])"
+        "[[:space:]]*>"
+    );
+
+    //Alias to a c complex type
+    //TODO: Add PyOpenCL's complex types...
+    return regex.sub("\\1 complex", original_declaration);
 }
 
 //Custom fixers
@@ -125,43 +173,43 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
 
         virtual void run(const MatchFinder::MatchResult &Result)
         {
-            /*//Grab the declaration statement
-            const DeclStmt *declaration_statement = 
-                Result.Nodes.getStmtAs<DeclStmt>("declaration_statement");
-
-            //Loop over all subdeclarations
-            DeclStmt::const_decl_iterator decl_iterator = 
-                declaration_statement->decl_begin();
-            while(decl_iterator != declaration_statement->decl_end())
-            {
-                //Check that this is a variable declaration
-                if(!isa<const VarDecl>(*decl_iterator))
-                {
-                    decl_iterator++;
-                    continue;
-                }
-
-                //Cast appropriately
-                const VarDecl *variable_declaration = cast<const VarDecl>(*decl_iterator);
-
-                //Grab the initializer
-                std::string init_text = variable_declaration->hasInit() ? getText(*Result.SourceManager, *variable_declaration->getInit()) : "";
-
-                printf("Found a variable declaration %s with init %s!\n", getText(*Result.SourceManager, *variable_declaration).c_str(), init_text.c_str());
-                printf("Type is %s\n", variable_declaration->getType().getAsString().c_str());
-                decl_iterator++;
-
-                //_replacements->insert(Replacement(*Result.SourceManager, ))
-            }*/
-
             //Grab the variable declaration
-            const VarDecl *declaration = Result.Nodes.getDeclAs<VarDecl>("declaration");
+            const VarDecl *declaration 
+                = Result.Nodes.getDeclAs<VarDecl>("declaration");
 
-            //Grab the initializer
-            std::string init_text = declaration->hasInit() ? getText(*Result.SourceManager, *declaration->getInit()) : "";
+            //If it is a system header, ignore it, because
+            //  1) Clang probably can't write to it anyway
+            //  2) If Clang CAN write to it, we sure as hell
+            //     don't want to.
+            if(Result.SourceManager->isInSystemHeader(
+                   declaration->getSourceRange().getBegin()
+               ))
+            {
+                return;
+            }
 
-            printf("Found a variable declaration %s with init %s!\n", getText(*Result.SourceManager, *declaration).c_str(), init_text.c_str());
-            printf("Type is %s\n", declaration->getType().getAsString().c_str());
+            //Grab the type declaration location
+            TypeLoc replacement_location 
+                = declaration->getTypeSourceInfo()->getTypeLoc();
+
+            //Grab the text which specifies the type
+            string type_text = getText(
+                *Result.SourceManager, 
+                replacement_location
+            );
+
+            //Adjust it appropriately
+            string replacement_text 
+                = transform_complex_type_declaration(type_text);
+
+            //Do the substitution
+            _replacements->insert(
+                Replacement(
+                    *Result.SourceManager,
+                    &replacement_location,
+                    replacement_text
+                )
+            );
         }
 
     private:
@@ -236,92 +284,32 @@ int main(int argc, const char **argv)
     ConstructorFixerCallback constructor_fixer(&Tool.getReplacements());
 
     //Add all the matchers we are interested in
-
-    //First, add a matcher to find variable declarations.  I'm not sure if this
-    //is actually the best way to do the matching.  I had to write a custom
-    //matcher to check if any of the declarations in a declaration statement 
-    //are of the specified match.  The only way that clang allows you to do it
-    //is to match single declarations or a specific index within the 
-    //declarations, but I need to know the type of the declaration.  I suppose
-    //that I could just check the 0th match, but I might need to modify the
-    //Nth declaration.
-    // Finder.addMatcher(
-    //     id(
-    //         "declaration_statement", 
-    //         declStmt(
-    //             containsDeclarationAnywhere(
-    //                 varDecl(
-    //                     anyOf(
-    //                         hasType(
-    //                             recordDecl(
-    //                                 hasName("std::complex")
-    //                             )
-    //                         ),
-    //                         hasType(
-    //                             pointsTo(
-    //                                 recordDecl(
-    //                                     hasName("std::complex")
-    //                                 )
-    //                             )
-    //                         ),
-    //                         hasType(
-    //                             references(
-    //                                 recordDecl(
-    //                                     hasName("std::complex")
-    //                                 )
-    //                             )
-    //                         )
-    //                     )
-    //                 )
-    //             )
-    //         )
-    //     ), 
-    //     &declaration_fixer
-    // );
     Finder.addMatcher(
         id(
             "declaration",
             varDecl(
-                anyOf(
-                    hasType(
-                        recordDecl(
-                            hasName("std::complex")
-                        )
-                    ),
-                    hasType(
-                        pointsTo(
-                            recordDecl(
-                                hasName("std::complex")
-                            )
-                        )
-                    ),
-                    hasType(
-                        references(
-                            recordDecl(
-                                hasName("std::complex")
-                            )
-                        )
-                    )
+                hasType(
+                    asMatchingString(".*complex<.*>.*")
                 )
             )
         ),
         &declaration_fixer
     );
-    Finder.addMatcher(
-        id(
-            "constructor_expression",
-            constructExpr(
-                hasDeclaration(
-                    methodDecl(
-                        ofClass(
-                            hasName("std::complex")
-                        )
-                    )
-                )
-            )
-        ),
-        &constructor_fixer
-    );
+    // Finder.addMatcher(
+    //     id(
+    //         "constructor_expression",
+    //         constructExpr(
+    //             hasDeclaration(
+    //                 methodDecl(
+    //                     ofClass(
+    //                         hasName("std::complex")
+    //                     )
+    //                 )
+    //             )
+    //         )
+    //     ),
+    //     &constructor_fixer
+    // );
 
     //Run the tool over the source code
     return Tool.run(newFrontendActionFactory(&Finder));
