@@ -225,7 +225,7 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
                     type_text
                 );
 
-            //Do the substitution
+            //Apply the replacement
             _replacements->insert(
                 Replacement(
                     *Result.SourceManager,
@@ -351,10 +351,7 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
                 constructor
             );
 
-            printf("DOING %s => %s\n", construction_text.c_str(), replacement_text.c_str());
-
             //Apply the replacement
-            //Do the substitution
             _replacements->insert(
                 Replacement(
                     *Result.SourceManager,
@@ -397,37 +394,173 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
                 return;
             }
 
-            //Grab the operator name (e.g. *, +, -, %)
+            //Grab the operator name (e.g. *, +, -, /)
             string operator_text = getText(
                 *Result.SourceManager,
                 *overloaded_operator->getCallee()
             );
+
+            //If it's not something we need to replace, ignore it
+            if(operator_text != "+" && operator_text != "-"
+               && operator_text != "*" && operator_text != "/")
+            {
+                printf("Ignoring op %s\n", operator_text.c_str());
+                return;
+            }
 
             //Grab the left and right subexpressions
             string left_text = getText(
                 *Result.SourceManager,
                 *overloaded_operator->getArg(0)
             );
+            bool left_is_real = 
+                overloaded_operator->getArg(0)->getType().getAsString().find('<') == string::npos;
 
             string right_text = getText(
                 *Result.SourceManager,
                 *overloaded_operator->getArg(1)
             );
+            bool right_is_real = 
+                overloaded_operator->getArg(1)->getType().getAsString().find('<') == string::npos;
 
+            //Calculate the complex base type (i.e. float, double)
+            const CXXRecordDecl *class_decl;
+            if(left_is_real)
+            {
+                class_decl = overloaded_operator->getArg(1)->getBestDynamicClassType();
+            }
+            else
+            {
+                class_decl = overloaded_operator->getArg(0)->getBestDynamicClassType();
+            }
+            const ClassTemplateSpecializationDecl *template_decl = 
+                cast<ClassTemplateSpecializationDecl>(class_decl);
+            QualType template_type = template_decl->getTemplateArgs().get(0).getAsType();
+            string base_type_string = template_type.getAsString();
 
+            //Calculate the appropriate replacement
+            string replacement_text;
+            if(operator_text == "+")
+            {
+                if(left_is_real)
+                {
+                    //Left is real, right is complex
+                    replacement_text = 
+                        "c" + base_type_string + "_radd(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+                else if(right_is_real)
+                {
+                    //Left is complex, right is real
+                    replacement_text = 
+                        "c" + base_type_string + "_addr(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+                else
+                {
+                    //Both are complex
+                    replacement_text = 
+                        "c" + base_type_string + "_add(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+            }
+            else if(operator_text == "-")
+            {
+                if(left_is_real)
+                {
+                    //Left is real, right is complex
+                    replacement_text = 
+                        "c" + base_type_string + "_radd(" + 
+                        left_text + ", " + 
+                        "-" + right_text + ")";
+                }
+                else if(right_is_real)
+                {
+                    //Left is complex, right is real
+                    replacement_text = 
+                        "c" + base_type_string + "_addr(" + 
+                        left_text + ", " + 
+                        "-" + right_text + ")";
+                }
+                else
+                {
+                    //Both are complex
+                    replacement_text = 
+                        "c" + base_type_string + "_add(" + 
+                        left_text + ", " + 
+                        "-" + right_text + ")";
+                }
+            }
+            else if(operator_text == "*")
+            {
+                if(left_is_real)
+                {
+                    //Left is real, right is complex
+                    replacement_text = 
+                        "c" + base_type_string + "_rmul(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+                else if(right_is_real)
+                {
+                    //Left is complex, right is real
+                    replacement_text = 
+                        "c" + base_type_string + "_mulr(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+                else
+                {
+                    //Both are complex
+                    replacement_text = 
+                        "c" + base_type_string + "_mul(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+            }
+            else if(operator_text == "/")
+            {
+                if(left_is_real)
+                {
+                    //Left is real, right is complex
+                    replacement_text = 
+                        "c" + base_type_string + "_rdivide(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+                else if(right_is_real)
+                {
+                    //Left is complex, right is real
+                    replacement_text = 
+                        "c" + base_type_string + "_divider(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+                else
+                {
+                    //Both are complex
+                    replacement_text = 
+                        "c" + base_type_string + "_divide(" + 
+                        left_text + ", " + 
+                        right_text + ")";
+                }
+            }
 
-            printf("Found binop LHS: %s RHS: %s\n", left_text.c_str(), right_text.c_str());
-
+            printf("Found binop: %s => %s\n", 
+                   getText(*Result.SourceManager, *overloaded_operator).c_str(),
+                   replacement_text.c_str());
 
             //Apply the replacement
-            //Do the substitution
-            // _replacements->insert(
-            //     Replacement(
-            //         *Result.SourceManager,
-            //         constructor,
-            //         replacement_text
-            //     )
-            // );
+            _replacements->insert(
+                Replacement(
+                    *Result.SourceManager,
+                    overloaded_operator,
+                    replacement_text
+                )
+            );
         }
 
     private:
