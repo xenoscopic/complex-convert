@@ -93,6 +93,18 @@ namespace clang
             llvm::Regex RE(RegExp);
             return RE.match(NameString);
         }
+
+        AST_MATCHER_P(CXXOperatorCallExpr, 
+                      operatorOn, 
+                      internal::Matcher<Expr>,
+                      InnerMatcher)
+        {
+            const Expr *ExprNode = const_cast<CXXOperatorCallExpr&>(Node)
+                .getCallee()
+                ->IgnoreParenImpCasts();
+                return (ExprNode != NULL &&
+                        InnerMatcher.matches(*ExprNode, Finder, Builder));
+        }
     }
 }
 
@@ -146,29 +158,38 @@ static std::string getText(const SourceManager &SourceManager, const T &Node)
     return std::string(Text, End.second - Start.second);
 }
 
-std::string transform_complex_type_declaration(std::string original_declaration)
-{
-    //Create a regular expression to grab the template type out.  This regex
-    //will match if the type is float or double or long double, though it could
-    //probably do with being tightened up a little bit...
-    llvm::Regex regex(
-        "[std:]*complex[[:space:]]*<[[:space:]]*"
-        "([[:alpha:]]*[[:space:]]*[[:alpha:]]*)"
-        "[[:space:]]*>"
-    );
-
-    //Alias to a c complex type
-    //TODO: Add PyOpenCL's complex types...
-    return regex.sub("\\1 complex", original_declaration);
-}
-
 //Custom fixers
 class DeclarationFixerCallback : public MatchFinder::MatchCallback
 {
     public:
-        DeclarationFixerCallback(Replacements *replacements) : _replacements(replacements)
+        DeclarationFixerCallback(
+            Replacements *replacements,
+            bool use_pyopencl_types
+        ) : 
+        _replacements(replacements),
+        _use_pyopencl_types(use_pyopencl_types)
         {
 
+        }
+
+        string transform_complex_type_declaration(string original_declaration)
+        {
+            //Create a regular expression to grab the template type out.  This regex
+            //will match if the type is float or double or long double, though it could
+            //probably do with being tightened up a little bit...
+            llvm::Regex regex(
+                "[std:]*complex[[:space:]]*<[[:space:]]*"
+                "([[:alpha:]]*)"
+                "[[:space:]]*>"
+            );
+
+            //Alias to a c complex type
+            if(_use_pyopencl_types)
+            {
+                return regex.sub("c\\1_t", original_declaration);
+            }
+
+            return regex.sub("\\1 complex", original_declaration);
         }
 
         virtual void run(const MatchFinder::MatchResult &Result)
@@ -200,7 +221,9 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
 
             //Adjust it appropriately
             string replacement_text =
-                transform_complex_type_declaration(type_text);
+                transform_complex_type_declaration(
+                    type_text
+                );
 
             //Do the substitution
             _replacements->insert(
@@ -214,52 +237,65 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
 
     private:
         Replacements *_replacements;
+        bool _use_pyopencl_types;
 };
-
-std::string transform_construction_expression(std::string original_expression)
-{
-    //Create a regular expression to pull the variable name out (if specified),
-    //the real argument, and the complex arguments out (i.e. 3 subexpressions).
-    llvm::Regex regex(
-        "([[:alnum:]]*)\\([[:space:]]*"
-        "([[:digit:]\\.]*)[[:space:]]*"
-        ",[[:space:]]*([[:digit:]\\.]*)"
-        "[[:space:]]*\\)"
-    );
-
-    //Search the construction expression
-    SmallVector<StringRef, 4> matches;
-    if(!regex.match(original_expression, &matches))
-    {
-        //No match, this is very bad
-        return "";
-    }
-
-    //Grab out match components
-    std::string variable_name = matches[1].str();
-    std::string real_literal = matches[2].str();
-    std::string imag_literal = matches[3].str();
-
-    //Create the new complex literal
-    //TODO: Add OpenCL support...
-    std::string new_literal = 
-        "((" + real_literal + ") + (" + imag_literal + " * _Complex_I))";
-
-    //Format the return based on the format of the original expression
-    if(variable_name == "")
-    {
-        return new_literal;
-    }
-
-    return variable_name + " = " + new_literal;
-}
 
 class ConstructorFixerCallback : public MatchFinder::MatchCallback
 {
     public:
-        ConstructorFixerCallback(Replacements *replacements) : _replacements(replacements)
+        ConstructorFixerCallback(
+            Replacements *replacements,
+            bool use_pyopencl_types
+        ) : 
+        _replacements(replacements),
+        _use_pyopencl_types(use_pyopencl_types)
         {
 
+        }
+
+        string transform_construction_expression(string original_expression)
+        {
+            //Create a regular expression to pull the variable name out (if specified),
+            //the real argument, and the complex arguments out (i.e. 3 subexpressions).
+            llvm::Regex regex(
+                "([[:alnum:]]*)\\([[:space:]]*"
+                "([[:digit:]\\.]*)[[:space:]]*"
+                ",[[:space:]]*([[:digit:]\\.]*)"
+                "[[:space:]]*\\)"
+            );
+
+            //Search the construction expression
+            SmallVector<StringRef, 4> matches;
+            if(!regex.match(original_expression, &matches))
+            {
+                //No match, this is very bad
+                return "";
+            }
+
+            //Grab out match components
+            string variable_name = matches[1].str();
+            string real_literal = matches[2].str();
+            string imag_literal = matches[3].str();
+
+            //Create the new complex literal
+            //TODO: Add OpenCL support...
+            string new_literal;
+            if(_use_pyopencl_types)
+            {
+                new_literal = "cfloat_new(" + real_literal + ", " + imag_literal + ")";
+            }
+            else
+            {
+                new_literal = "((" + real_literal + ") + (" + imag_literal + " * _Complex_I))";
+            }
+
+            //Format the return based on the format of the original expression
+            if(variable_name == "")
+            {
+                return new_literal;
+            }
+
+            return variable_name + " = " + new_literal;
         }
 
         virtual void run(const MatchFinder::MatchResult &Result)
@@ -309,9 +345,81 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
 
     private:
         Replacements *_replacements;
+        bool _use_pyopencl_types;
+};
+
+//This callback is only for PyOpenCL anyway, so it doesn't need to know the 
+//mode the converter is running in, it will either be added or won't be.
+class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
+{
+    public:
+        OverloadedOperationFixerCallback(Replacements *replacements) : 
+        _replacements(replacements)
+        {
+
+        }
+
+        virtual void run(const MatchFinder::MatchResult &Result)
+        {
+            //Grab the operator expression
+            const CXXOperatorCallExpr *overloaded_operator =
+                Result.Nodes.getStmtAs<CXXOperatorCallExpr>("overloaded_operator");
+
+            //If it is a system header, ignore it, because
+            //  1) Clang probably can't write to it anyway
+            //  2) If Clang CAN write to it, we sure as hell
+            //     don't want to.
+            if(Result.SourceManager->isInSystemHeader(
+                   overloaded_operator->getSourceRange().getBegin()
+               ))
+            {
+                return;
+            }
+
+            //Grab the operator name (e.g. *, +, -, %)
+            string operator_text = getText(
+                *Result.SourceManager,
+                *overloaded_operator->getCallee()
+            );
+
+            //Grab the left and right subexpressions
+            string left_text = getText(
+                *Result.SourceManager,
+                *overloaded_operator->getArg(0)
+            );
+
+            string right_text = getText(
+                *Result.SourceManager,
+                *overloaded_operator->getArg(1)
+            );
+
+
+
+            printf("Found binop LHS: %s RHS: %s\n", left_text.c_str(), right_text.c_str());
+
+
+            //Apply the replacement
+            //Do the substitution
+            // _replacements->insert(
+            //     Replacement(
+            //         *Result.SourceManager,
+            //         constructor,
+            //         replacement_text
+            //     )
+            // );
+        }
+
+    private:
+        Replacements *_replacements;
 };
 
 //Set up the command line options
+cl::opt<std::string> ComplexMode(
+    "complex-mode",
+    cl::desc("The mode for complex translation, c99 (default) or opencl"),
+    cl::value_desc("mode")
+);
+
 cl::opt<std::string> BuildPath(
     cl::Positional,
     cl::desc("<build-path>")
@@ -330,6 +438,10 @@ int main(int argc, const char **argv)
     llvm::OwningPtr<CompilationDatabase> Compilations(
         FixedCompilationDatabase::loadFromCommandLine(argc, argv)
     );
+
+    //Parse command line options.
+    //NOTE: This HAS to be done after loadFromCommandLine, otherwise
+    //things go haywire.
     cl::ParseCommandLineOptions(argc, argv);
 
     //If there was no command-line compilation database, create one from a
@@ -351,6 +463,17 @@ int main(int argc, const char **argv)
         }
     }
 
+    //Check the conversion mode
+    bool use_pyopencl_types = false;
+    if(ComplexMode == "opencl")
+    {
+        use_pyopencl_types = true;
+    }
+    else if(ComplexMode != "" && ComplexMode != "c99")
+    {
+        llvm::report_fatal_error("Unknown complex conversion mode.");
+    }
+
     //Run a series of refactoring tools:
     //  1) Replace all binary operations.
     //  2) Replace all complex<...> types for variable declarations, including
@@ -365,8 +488,15 @@ int main(int argc, const char **argv)
     ast_matchers::MatchFinder Finder;
 
     //Set up our individual refactoring tools
-    DeclarationFixerCallback declaration_fixer(&Tool.getReplacements());
-    ConstructorFixerCallback constructor_fixer(&Tool.getReplacements());
+    DeclarationFixerCallback declaration_fixer(
+        &Tool.getReplacements(), 
+        use_pyopencl_types
+    );
+    ConstructorFixerCallback constructor_fixer(
+        &Tool.getReplacements(),
+        use_pyopencl_types
+    );
+    OverloadedOperationFixerCallback operator_fixer(&Tool.getReplacements());
 
     //Add all the matchers we are interested in
     Finder.addMatcher(
@@ -407,6 +537,25 @@ int main(int argc, const char **argv)
         ),
         &constructor_fixer
     );
+    if(use_pyopencl_types)
+    {
+        Finder.addMatcher(
+            id(
+                "overloaded_operator",
+                operatorCallExpr(
+                    operatorOn(
+                        hasType(
+                            asMatchingString(".*complex<.*>.*")
+                        )
+                    )
+                )
+            ),
+            &operator_fixer
+        );
+    }
+
+    //TODO: Match member functions (real/imag)
+    //TODO: Match overloaded functions (abs, pow, etc)
 
     //Run the tool over the source code
     return Tool.run(newFrontendActionFactory(&Finder));
