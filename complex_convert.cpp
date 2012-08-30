@@ -152,8 +152,8 @@ std::string transform_complex_type_declaration(std::string original_declaration)
     //will match if the type is float or double or long double, though it could
     //probably do with being tightened up a little bit...
     llvm::Regex regex(
-        ".*complex[[:space:]]*<[[:space:]]*"
-        "([[:alpha:]].*[[:alpha:]])"
+        "[std:]*complex[[:space:]]*<[[:space:]]*"
+        "([[:alpha:]]*[[:space:]]*[[:alpha:]]*)"
         "[[:space:]]*>"
     );
 
@@ -174,8 +174,8 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
         virtual void run(const MatchFinder::MatchResult &Result)
         {
             //Grab the variable declaration
-            const VarDecl *declaration 
-                = Result.Nodes.getDeclAs<VarDecl>("declaration");
+            const DeclaratorDecl *declaration = 
+                Result.Nodes.getDeclAs<DeclaratorDecl>("declaration");
 
             //If it is a system header, ignore it, because
             //  1) Clang probably can't write to it anyway
@@ -189,8 +189,8 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
             }
 
             //Grab the type declaration location
-            TypeLoc replacement_location 
-                = declaration->getTypeSourceInfo()->getTypeLoc();
+            TypeLoc replacement_location =
+                declaration->getTypeSourceInfo()->getTypeLoc();
 
             //Grab the text which specifies the type
             string type_text = getText(
@@ -199,8 +199,8 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
             );
 
             //Adjust it appropriately
-            string replacement_text 
-                = transform_complex_type_declaration(type_text);
+            string replacement_text =
+                transform_complex_type_declaration(type_text);
 
             //Do the substitution
             _replacements->insert(
@@ -216,6 +216,44 @@ class DeclarationFixerCallback : public MatchFinder::MatchCallback
         Replacements *_replacements;
 };
 
+std::string transform_construction_expression(std::string original_expression)
+{
+    //Create a regular expression to pull the variable name out (if specified),
+    //the real argument, and the complex arguments out (i.e. 3 subexpressions).
+    llvm::Regex regex(
+        "([[:alnum:]]*)\\([[:space:]]*"
+        "([[:digit:]\\.]*)[[:space:]]*"
+        ",[[:space:]]*([[:digit:]\\.]*)"
+        "[[:space:]]*\\)"
+    );
+
+    //Search the construction expression
+    SmallVector<StringRef, 4> matches;
+    if(!regex.match(original_expression, &matches))
+    {
+        //No match, this is very bad
+        return "";
+    }
+
+    //Grab out match components
+    std::string variable_name = matches[1].str();
+    std::string real_literal = matches[2].str();
+    std::string imag_literal = matches[3].str();
+
+    //Create the new complex literal
+    //TODO: Add OpenCL support...
+    std::string new_literal = 
+        "((" + real_literal + ") + (" + imag_literal + " * _Complex_I))";
+
+    //Format the return based on the format of the original expression
+    if(variable_name == "")
+    {
+        return new_literal;
+    }
+
+    return variable_name + " = " + new_literal;
+}
+
 class ConstructorFixerCallback : public MatchFinder::MatchCallback
 {
     public:
@@ -226,7 +264,47 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
 
         virtual void run(const MatchFinder::MatchResult &Result)
         {
-            printf("Matched constructor\n");
+            //Grab the constructor expression
+            const CXXConstructExpr *constructor =
+                Result.Nodes.getStmtAs<CXXConstructExpr>("constructor");
+
+            //If it is a system header, ignore it, because
+            //  1) Clang probably can't write to it anyway
+            //  2) If Clang CAN write to it, we sure as hell
+            //     don't want to.
+            if(Result.SourceManager->isInSystemHeader(
+                   constructor->getSourceRange().getBegin()
+               ))
+            {
+                return;
+            }
+
+            //Grab the text which specifies the type
+            string construction_text = getText(
+                *Result.SourceManager, 
+                *constructor
+            );
+
+            //If there is no explicit construction going on, we needn't worry
+            if(construction_text.find(',') == string::npos)
+            {
+                return;
+            }
+
+            //Adjust it appropriately
+            string replacement_text = transform_construction_expression(
+                construction_text
+            );
+
+            //Apply the replacement
+            //Do the substitution
+            _replacements->insert(
+                Replacement(
+                    *Result.SourceManager,
+                    constructor,
+                    replacement_text
+                )
+            );
         }
 
     private:
@@ -273,6 +351,13 @@ int main(int argc, const char **argv)
         }
     }
 
+    //Run a series of refactoring tools:
+    //  1) Replace all binary operations.
+    //  2) Replace all complex<...> types for variable declarations, including
+    //     local variables, function/method parameters, struct/class members.
+    //  2) Replace all complex<...> constructor calls.
+    //  3) Replace all complex<...> function return types.
+
     //Create a refactoring tool that simply runs a series of AST matchers
     RefactoringTool Tool(*Compilations, SourcePaths);
 
@@ -295,21 +380,33 @@ int main(int argc, const char **argv)
         ),
         &declaration_fixer
     );
-    // Finder.addMatcher(
-    //     id(
-    //         "constructor_expression",
-    //         constructExpr(
-    //             hasDeclaration(
-    //                 methodDecl(
-    //                     ofClass(
-    //                         hasName("std::complex")
-    //                     )
-    //                 )
-    //             )
-    //         )
-    //     ),
-    //     &constructor_fixer
-    // );
+
+    Finder.addMatcher(
+        id(
+            "declaration",
+            functionDecl(
+                returns(
+                    asMatchingString(".*complex<.*>.*")
+                )
+            )
+        ),
+        &declaration_fixer
+    );
+    Finder.addMatcher(
+        id(
+            "constructor",
+            constructExpr(
+                hasDeclaration(
+                    methodDecl(
+                        ofClass(
+                            hasName("std::complex")
+                        )
+                    )
+                )
+            )
+        ),
+        &constructor_fixer
+    );
 
     //Run the tool over the source code
     return Tool.run(newFrontendActionFactory(&Finder));
