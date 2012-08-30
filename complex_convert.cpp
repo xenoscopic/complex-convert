@@ -253,7 +253,8 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
 
         }
 
-        string transform_construction_expression(string original_expression)
+        string transform_construction_expression(string original_expression, 
+                                                 const CXXConstructExpr *constructor)
         {
             //Create a regular expression to pull the variable name out (if specified),
             //the real argument, and the complex arguments out (i.e. 3 subexpressions).
@@ -282,7 +283,18 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
             string new_literal;
             if(_use_pyopencl_types)
             {
-                new_literal = "cfloat_new(" + real_literal + ", " + imag_literal + ")";
+                //This is a bit of a pain.  We have to grab the original class,
+                //cast it to a template specialization, and figure out the 
+                //template argument type.
+                //NOTE: This seems to cause problems in cases like:
+                //  std::complex<double> var = std::complex<float>(5,3)
+                //Clang does not seem to like these conversion assignments, and
+                //it screws up the resultant text.  I don't know why.
+                CXXRecordDecl *class_decl = constructor->getConstructor()->getParent();
+                ClassTemplateSpecializationDecl *template_decl = 
+                    cast<ClassTemplateSpecializationDecl>(class_decl);
+                QualType template_type = template_decl->getTemplateArgs().get(0).getAsType();
+                new_literal = "(c" + template_type.getAsString() + "_new(" + real_literal + ", " + imag_literal + "))";
             }
             else
             {
@@ -327,10 +339,19 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
                 return;
             }
 
+            //If this is a copy or assignment constructor, ignore
+            if(construction_text.find("=") != string::npos)
+            {
+                return;
+            }
+
             //Adjust it appropriately
             string replacement_text = transform_construction_expression(
-                construction_text
+                construction_text,
+                constructor
             );
+
+            printf("DOING %s => %s\n", construction_text.c_str(), replacement_text.c_str());
 
             //Apply the replacement
             //Do the substitution
