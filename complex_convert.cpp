@@ -36,6 +36,7 @@
 
 //Standard includes
 #include <cstdio>
+#include <map>
 
 //Clang includes
 #include "clang/ASTMatchers/ASTMatchers.h"
@@ -294,7 +295,7 @@ class ConstructorFixerCallback : public MatchFinder::MatchCallback
                 ClassTemplateSpecializationDecl *template_decl = 
                     cast<ClassTemplateSpecializationDecl>(class_decl);
                 QualType template_type = template_decl->getTemplateArgs().get(0).getAsType();
-                new_literal = "(c" + template_type.getAsString() + "_new(" + real_literal + ", " + imag_literal + "))";
+                new_literal = "c" + template_type.getAsString() + "_new(" + real_literal + ", " + imag_literal + ")";
             }
             else
             {
@@ -404,24 +405,57 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
             if(operator_text != "+" && operator_text != "-"
                && operator_text != "*" && operator_text != "/")
             {
-                printf("Ignoring op %s\n", operator_text.c_str());
                 return;
             }
 
-            //Grab the left and right subexpressions
-            string left_text = getText(
-                *Result.SourceManager,
-                *overloaded_operator->getArg(0)
+            //We need to do three replacements, we can't just replace the whole
+            //node, because there may be subexpressions that are also replaced
+            //and things will get messed up.  So, assuming we have an expression
+            //of the form:
+            // 
+            //  a O b
+            //
+            //with SourceLocation's 1, 2, 3:
+            //
+            //  1a 2O b3
+            //
+            //we need to do the following substitutions
+            // 
+            //  1: Insert "OPERATOR_FUNCTION("
+            //  2: Replace the operator spelling node with ","
+            //  3: Insert ")"
+
+            //Grab the locations of interest
+            SourceLocation start_location = 
+                Result.SourceManager->getSpellingLoc(
+                    overloaded_operator->getArg(0)->getLocStart()
+                );
+            SourceLocation mid_location = 
+                Result.SourceManager->getSpellingLoc(
+                    overloaded_operator->getCallee()->getLocStart()
+                );
+            SourceLocation end_location = Lexer::getLocForEndOfToken(
+                Result.SourceManager->getSpellingLoc(
+                    overloaded_operator->getArg(1)->getLocEnd()
+                ), 
+                0, 
+                *Result.SourceManager, 
+                LangOptions()
             );
+
+            //Grab the left and right subexpressions and determine their types
+            //HACK: This is a really bad way of determining type.  See if there
+            //is a better way to check it.
             bool left_is_real = 
                 overloaded_operator->getArg(0)->getType().getAsString().find('<') == string::npos;
-
-            string right_text = getText(
-                *Result.SourceManager,
-                *overloaded_operator->getArg(1)
-            );
             bool right_is_real = 
                 overloaded_operator->getArg(1)->getType().getAsString().find('<') == string::npos;
+
+            //TEMP: Print some information
+            printf("Fixing: %s (%i (%s) %i (%s))\n", getText(
+                *Result.SourceManager,
+                *overloaded_operator
+            ).c_str(), left_is_real, overloaded_operator->getArg(0)->getType().getAsString().c_str(), right_is_real, overloaded_operator->getArg(1)->getType().getAsString().c_str());
 
             //Calculate the complex base type (i.e. float, double)
             const CXXRecordDecl *class_decl;
@@ -439,32 +473,29 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
             string base_type_string = template_type.getAsString();
 
             //Calculate the appropriate replacement
+            string start_insert;
+            string mid_replacement = ",";
+            string end_insert = ")";
             string replacement_text;
             if(operator_text == "+")
             {
                 if(left_is_real)
                 {
                     //Left is real, right is complex
-                    replacement_text = 
-                        "c" + base_type_string + "_radd(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_radd(";
                 }
                 else if(right_is_real)
                 {
                     //Left is complex, right is real
-                    replacement_text = 
-                        "c" + base_type_string + "_addr(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_addr(";
                 }
                 else
                 {
                     //Both are complex
-                    replacement_text = 
-                        "c" + base_type_string + "_add(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_add(";
                 }
             }
             else if(operator_text == "-")
@@ -472,26 +503,20 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
                 if(left_is_real)
                 {
                     //Left is real, right is complex
-                    replacement_text = 
-                        "c" + base_type_string + "_radd(" + 
-                        left_text + ", " + 
-                        "-" + right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_radd(";
                 }
                 else if(right_is_real)
                 {
                     //Left is complex, right is real
-                    replacement_text = 
-                        "c" + base_type_string + "_addr(" + 
-                        left_text + ", " + 
-                        "-" + right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_addr(";
                 }
                 else
                 {
                     //Both are complex
-                    replacement_text = 
-                        "c" + base_type_string + "_add(" + 
-                        left_text + ", " + 
-                        "-" + right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_add(";
                 }
             }
             else if(operator_text == "*")
@@ -499,26 +524,20 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
                 if(left_is_real)
                 {
                     //Left is real, right is complex
-                    replacement_text = 
-                        "c" + base_type_string + "_rmul(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_rmul(";
                 }
                 else if(right_is_real)
                 {
                     //Left is complex, right is real
-                    replacement_text = 
-                        "c" + base_type_string + "_mulr(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_mulr(";
                 }
                 else
                 {
                     //Both are complex
-                    replacement_text = 
-                        "c" + base_type_string + "_mul(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_mul(";
                 }
             }
             else if(operator_text == "/")
@@ -526,45 +545,115 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
                 if(left_is_real)
                 {
                     //Left is real, right is complex
-                    replacement_text = 
-                        "c" + base_type_string + "_rdivide(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_rdivide(";
                 }
                 else if(right_is_real)
                 {
                     //Left is complex, right is real
-                    replacement_text = 
-                        "c" + base_type_string + "_divider(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_divider(";
                 }
                 else
                 {
                     //Both are complex
-                    replacement_text = 
-                        "c" + base_type_string + "_divide(" + 
-                        left_text + ", " + 
-                        right_text + ")";
+                    start_insert = 
+                        "c" + base_type_string + "_divide(";
+                }
+            }
+            
+            //HACK: This may well be the nastiest hack ever.  The problem is 
+            //that the refactoring AST match finder does a DFS, so combined
+            //operations come in in reverse-order-of-operations.  E.g.
+            //
+            //  c1 OP_A c2 OP_B c3
+            //
+            //comes in order as:
+            //
+            //  (c1 OP_A c2) OP_B c3
+            //  c1 OP_A c2
+            //
+            //Then the problem comes that we need to do 2 insertions at c1, and
+            //both insertions will have the same SourceLocation.  The other 
+            //problem is that the "Replacements" type is a weakly-ordered set
+            //where replacement comparison is done in the order of:
+            //
+            //  FilePath (same in both cases)
+            //  Offset (same in both cases)
+            //  Length (0, same in both cases)
+            //  ReplacementText
+            //
+            //Thus the ordering of inserts depends on the function name that we
+            //are inserting.  Then, to REALLY top it off, inserts at the same 
+            //location will be serialized, so that later inserts will just be
+            //inserted after the first inserted text, so essentially things get
+            //really messed up, really quickly.
+            //Hence, we do the following hack:  We assume that
+            //the matches come in reverse order of operation, and when we do an
+            //insertion at the beginning, we scan to see if there is already an
+            //insertion at that location, and if there is, we append to it.
+            //Even worse though is that you can't grab the ReplacementText 
+            //property of a Replacement, so we have to cache them in the class.
+
+            //Create the initial new start insertion
+            Replacement start_insertion(
+                *Result.SourceManager,
+                start_location,
+                0,
+                start_insert
+            );
+
+            //See if there is already an insertion at this location
+            for(Replacements::iterator rit = _replacements->begin();
+                rit != _replacements->end();
+                rit++)
+            {
+                if(start_insertion.getFilePath().compare(rit->getFilePath()) == 0
+                   && start_insertion.getOffset() == rit->getOffset()
+                   && start_insertion.getLength() == rit->getLength())
+                {
+                    //Update the start replacement string
+                    start_insert = _previous_insertions[start_location] + start_insert;
+                    //Remove the old one
+                    _replacements->erase(rit);
+                    //Recreate the replacement
+                    start_insertion = Replacement(
+                        *Result.SourceManager,
+                        start_location,
+                        0,
+                        start_insert
+                    );
+                    //Get out of this loop since our iterator is now invalid
+                    break;
                 }
             }
 
-            printf("Found binop: %s => %s\n", 
-                   getText(*Result.SourceManager, *overloaded_operator).c_str(),
-                   replacement_text.c_str());
+            //Record and apply the start insertion
+            _replacements->insert(start_insertion);
+            _previous_insertions[start_location] = start_insert;
 
-            //Apply the replacement
+            //Do the rest of the insertions/replacements
             _replacements->insert(
                 Replacement(
                     *Result.SourceManager,
-                    overloaded_operator,
-                    replacement_text
+                    mid_location,
+                    1, //All our operators should only be 1 character
+                    mid_replacement
+                )
+            );
+            _replacements->insert(
+                Replacement(
+                    *Result.SourceManager,
+                    end_location,
+                    0,
+                    end_insert
                 )
             );
         }
 
     private:
         Replacements *_replacements;
+        map<SourceLocation, string> _previous_insertions;
 };
 
 //Set up the command line options
