@@ -474,7 +474,10 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
 
             //Calculate the appropriate replacement
             string start_insert;
-            string mid_replacement = ",";
+            //HACK: No subtraction methods available in PyOpenCL.  Could 
+            //implement them there, or just negate the second guy and use
+            //addition.
+            string mid_replacement = operator_text == "-" ? ",-" : ","; 
             string end_insert = ")";
             string replacement_text;
             if(operator_text == "+")
@@ -656,6 +659,177 @@ class OverloadedOperationFixerCallback : public MatchFinder::MatchCallback
         map<SourceLocation, string> _previous_insertions;
 };
 
+class MemberFunctionFixerCallback : public MatchFinder::MatchCallback
+{
+    public:
+        MemberFunctionFixerCallback(
+            Replacements *replacements,
+            bool use_pyopencl_types
+        ) : 
+        _replacements(replacements),
+        _use_pyopencl_types(use_pyopencl_types)
+        {
+
+        }
+
+        virtual void run(const MatchFinder::MatchResult &Result)
+        {
+            //Grab the operator expression
+            const CXXMemberCallExpr *member_call =
+                Result.Nodes.getStmtAs<CXXMemberCallExpr>("member_call");
+
+            //If it is a system header, ignore it, because
+            //  1) Clang probably can't write to it anyway
+            //  2) If Clang CAN write to it, we sure as hell
+            //     don't want to.
+            if(Result.SourceManager->isInSystemHeader(
+                   member_call->getSourceRange().getBegin()
+               ))
+            {
+                return;
+            }
+
+            //Grab the object
+            Expr *call_variable = member_call->getImplicitObjectArgument();
+
+            //Check if this is a dereference call
+            bool is_dereference = 
+                cast<MemberExpr>(member_call->getCallee())->isArrow();
+
+            //We need to do two operations:
+            //  1) An insertion of "METHOD_NAME(" or "METHOD_NAME(*(" before
+            //     the call variable.
+            //  2) An insertion of ) or )) over the member expression, i.e.
+            //     replacing the .METHOD_NAME() or ->METHOD_NAME()
+
+            //Determine the method name (will be "real" or "imag")
+            string member_name = 
+                member_call->getMethodDecl()->getNameAsString();
+
+            //Calculate the complex base type (i.e. float, double)
+            CXXRecordDecl *class_decl = member_call->getRecordDecl();
+            ClassTemplateSpecializationDecl *template_decl = 
+                cast<ClassTemplateSpecializationDecl>(class_decl);
+            QualType template_type = template_decl->getTemplateArgs().get(0).getAsType();
+            string base_type_string = template_type.getAsString();
+
+            //Determine the appropriate prefix/suffix
+            string prefix;
+            string suffix = ")";
+            if(member_name == "real")
+            {
+                if(_use_pyopencl_types)
+                {
+                    prefix = "c" + base_type_string + "_real";
+                }
+                else
+                {
+                    prefix = string("creal") + (base_type_string == "float" ? "f" : "");
+                }
+            }
+            else if(member_name == "imag")
+            {
+                if(_use_pyopencl_types)
+                {
+                    prefix = "c" + base_type_string + "_imag";
+                }
+                else
+                {
+                    prefix = string("cimag") + (base_type_string == "float" ? "f" : "");
+                }
+            }
+            else
+            {
+                //Unknow method
+                return;
+            }
+            prefix += "(";
+            if(is_dereference)
+            {
+                prefix += "*(";
+                suffix += ")";
+            }
+
+            //Grab all of the expression text
+            string complete_expression = getText(
+                *Result.SourceManager,
+                *member_call
+            );
+
+            //Grab the text of just called variable
+            string called_variable = getText(
+                *Result.SourceManager,
+                *call_variable
+            );
+
+            //Determine the length of stuff trailing after the variable
+            unsigned tail_length = 
+                complete_expression.size() - called_variable.size();
+
+            //Calculate start/end insertion location
+            SourceLocation start_location = 
+                Result.SourceManager->getSpellingLoc(
+                    call_variable->getLocStart()
+                );
+            SourceLocation end_location = 
+                start_location.getLocWithOffset(called_variable.size());
+
+            //Set up the insertions/replacements
+            _replacements->insert(
+                Replacement(
+                    *Result.SourceManager,
+                    start_location,
+                    0,
+                    prefix
+                )
+            );
+            _replacements->insert(
+                Replacement(
+                    *Result.SourceManager,
+                    end_location,
+                    tail_length,
+                    suffix
+                )
+            );
+
+            printf("Found member function call on %s [%s] (%i)\n%s\n%s\n", getText(
+                *Result.SourceManager,
+                *call_variable
+            ).c_str(), getText(
+                *Result.SourceManager,
+                *cast<MemberExpr>(member_call->getCallee())
+            ).c_str(),is_dereference, prefix.c_str(), suffix.c_str());
+
+        }
+
+    private:
+        Replacements *_replacements;
+        bool _use_pyopencl_types;
+};
+
+class StaticFunctionFixerCallback : public MatchFinder::MatchCallback
+{
+    public:
+        StaticFunctionFixerCallback(
+            Replacements *replacements,
+            bool use_pyopencl_types
+        ) : 
+        _replacements(replacements),
+        _use_pyopencl_types(use_pyopencl_types)
+        {
+
+        }
+
+        virtual void run(const MatchFinder::MatchResult &Result)
+        {
+            printf("Found static function call\n");
+        }
+
+    private:
+        Replacements *_replacements;
+        bool _use_pyopencl_types;
+};
+
 //Set up the command line options
 cl::opt<std::string> ComplexMode(
     "complex-mode",
@@ -740,6 +914,14 @@ int main(int argc, const char **argv)
         use_pyopencl_types
     );
     OverloadedOperationFixerCallback operator_fixer(&Tool.getReplacements());
+    MemberFunctionFixerCallback member_function_fixer(
+        &Tool.getReplacements(),
+        use_pyopencl_types
+    );
+    StaticFunctionFixerCallback static_function_fixer(
+        &Tool.getReplacements(),
+        use_pyopencl_types
+    );
 
     //Add all the matchers we are interested in
     Finder.addMatcher(
@@ -753,7 +935,6 @@ int main(int argc, const char **argv)
         ),
         &declaration_fixer
     );
-
     Finder.addMatcher(
         id(
             "declaration",
@@ -796,9 +977,37 @@ int main(int argc, const char **argv)
             &operator_fixer
         );
     }
+    Finder.addMatcher(
+        id(
+            "member_call",
+            memberCallExpr(
+                on(
+                    hasType(
+                        asMatchingString(".*complex<.*>.*")
+                    )
+                )
+            )
+        ),
+        &member_function_fixer
+    );
+    Finder.addMatcher(
+        id(
+            "static_call",
+            callExpr(
+                argumentCountIs(1),
+                hasArgument(
+                    0,
+                    hasType(
+                        asMatchingString(".*complex<.*>.*")
+                    )
+                )
+            )
+        ),
+        &static_function_fixer
+    );
 
-    //TODO: Match member functions (real/imag)
-    //TODO: Match overloaded functions (abs, pow, etc)
+    //TODO: Run through the list of files and replace "#include <complex>" with "#include <complex.h>"
+    //unfortunately there are no AST matchers for preprocessor macros...
 
     //Run the tool over the source code
     return Tool.run(newFrontendActionFactory(&Finder));
