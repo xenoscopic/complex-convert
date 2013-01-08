@@ -822,7 +822,52 @@ class StaticFunctionFixerCallback : public MatchFinder::MatchCallback
 
         virtual void run(const MatchFinder::MatchResult &Result)
         {
-            printf("Found static function call\n");
+            //Grab the call expression
+            const CallExpr *static_call =
+                Result.Nodes.getStmtAs<CallExpr>("static_call");
+
+            //Ignore operator calls
+            if(isa<CXXOperatorCallExpr>(static_call)
+               || isa<CXXMemberCallExpr>(static_call))
+            {
+                return;
+            }
+
+            //If it is a system header, ignore it, because
+            //  1) Clang probably can't write to it anyway
+            //  2) If Clang CAN write to it, we sure as hell
+            //     don't want to.
+            if(Result.SourceManager->isInSystemHeader(
+                   static_call->getSourceRange().getBegin()
+               ))
+            {
+                return;
+            }            
+
+            //Grab the function declaration
+            const FunctionDecl *function = static_call->getDirectCallee();
+            string function_name = function->getNameAsString().c_str();
+            
+            //Calculate the appropriate replacement function
+            if(function_name == "conj")
+            {
+                
+            }
+            else if(function_name == "real")
+            {
+
+            }
+            else if(function_name == "imag")
+            {
+
+            }
+            else
+            {
+                //Unsupported function
+                return;
+            }
+
+            printf("Found static function call to %s\n", function->getNameAsString().c_str());
         }
 
     private:
